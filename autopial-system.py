@@ -75,11 +75,12 @@ class SystemWorker(AutopialWorker):
         return
 
 class BandwidthWorker(AutopialWorker):
-    def __init__(self, mqtt_client, time_sleep):
+    def __init__(self, mqtt_client, time_sleep, interface_name):
         AutopialWorker.__init__(self, mqtt_client, time_sleep, logger=logger)
         self.__previous_rx = None
         self.__previous_tx = None
         self.__previous_ts = None
+        self.interface_name = interface_name
 
     def run(self):
         logger.info("BandwidthWorker thread starts")
@@ -88,14 +89,17 @@ class BandwidthWorker(AutopialWorker):
         logger.info("BandwidthWorker thread ends")
 
     def get_bytes(self, t, iface):
-        with open('/sys/class/net/' + iface + '/statistics/' + t + '_bytes', 'r') as f:
-            data = f.read();
-            return int(data)
+        try:
+            with open('/sys/class/net/' + iface + '/statistics/' + t + '_bytes', 'r') as f:
+                data = f.read();
+                return int(data)
+        except FileNotFoundError:
+            return 0
 
-    def get_network_data(self, iface="enp0s3"):
+    def get_network_data(self):
         current_ts = time.time()
-        current_tx = self.get_bytes('tx', iface)
-        current_rx = self.get_bytes('rx', iface)
+        current_tx = self.get_bytes('tx', self.interface_name)
+        current_rx = self.get_bytes('rx', self.interface_name)
 
         if self.__previous_rx is not None and self.__previous_tx is not None:
             delta_ts = current_ts - self.__previous_ts
@@ -104,7 +108,7 @@ class BandwidthWorker(AutopialWorker):
 
             topic = "autopial/system/network/bandwidth"
             value = {
-                "iface": iface,
+                "iface": self.interface_name,
                 "rx_speed": rx_speed,
                 "tx_speed": tx_speed,
             }
@@ -115,8 +119,10 @@ class BandwidthWorker(AutopialWorker):
         self.__previous_ts = current_ts
 
 class PingWorker(AutopialWorker):
-    def __init__(self, mqtt_client, time_sleep):
+    def __init__(self, mqtt_client, time_sleep, internet_ping, pixussi_ping):
         AutopialWorker.__init__(self, mqtt_client, time_sleep, logger=logger)
+        self.internet_ping = internet_ping
+        self.pixussi_ping = pixussi_ping
 
     def run(self):
         logger.info("PingWorker thread starts")
@@ -136,11 +142,11 @@ class PingWorker(AutopialWorker):
 
     def ping_networks(self):
         topic = "autopial/system/network/ping/internet"
-        value = self.ping('8.8.8.8')
+        value = self.ping(self.internet_ping)
         self.publish(topic, value)
 
         topic = "autopial/system/network/ping/pixussi"
-        value = self.ping('192.168.1.56')
+        value = self.ping(self.pixussi_ping)
         self.publish(topic, value)
         pass
 
@@ -175,8 +181,13 @@ if __name__ == '__main__':
     cfg = ConfigFile("autopial-system.cfg", logger=logger)
     try:
         system_publish_every = cfg.get("workers", "SystemWorker", "publish_every")
+
         bandwidth_publish_every = cfg.get("workers", "BandwidthWorker", "publish_every")
+        interface_name = cfg.get("workers", "BandwidthWorker", "interface")
+
         ping_publish_every = cfg.get("workers", "PingWorker", "publish_every")
+        internet_ping = cfg.get("workers", "PingWorker", "internet")
+        pixussi_ping = cfg.get("workers", "PingWorker", "pixussi")
     except BaseException as e:
         logger.error("Invalid config file: {}".format(e))
         sys.exit(1)
@@ -185,10 +196,15 @@ if __name__ == '__main__':
     worker_system = SystemWorker("SystemWorker", time_sleep=system_publish_every)
     worker_system.start()
 
-    worker_bandwidth = BandwidthWorker("BandwidthWorker", time_sleep=bandwidth_publish_every)
+    worker_bandwidth = BandwidthWorker("BandwidthWorker",
+                                       time_sleep=bandwidth_publish_every,
+                                       interface_name=interface_name)
     worker_bandwidth.start()
 
-    worker_ping = PingWorker("PingWorker", time_sleep=ping_publish_every)
+    worker_ping = PingWorker("PingWorker",
+                             time_sleep=ping_publish_every,
+                             internet_ping=internet_ping,
+                             pixussi_ping=pixussi_ping)
     worker_ping.start()
 
     try:
