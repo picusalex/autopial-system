@@ -6,8 +6,8 @@ import platform
 import psutil
 import socket
 import os
+import subprocess
 
-import paho.mqtt.client as mqtt #import the client1
 import time
 
 import sys
@@ -119,37 +119,94 @@ class BandwidthWorker(AutopialWorker):
         self.__previous_ts = current_ts
 
 class PingWorker(AutopialWorker):
-    def __init__(self, mqtt_client, time_sleep, internet_ping, pixussi_ping):
+    def __init__(self, mqtt_client, time_sleep, internet_ping, pixussi_ping, apn, vpn_config):
         AutopialWorker.__init__(self, mqtt_client, time_sleep, logger=logger)
-        self.internet_ping = internet_ping
-        self.pixussi_ping = pixussi_ping
+
+        self.lte_process = None
+        self.vpn_process = None
+
+        self.internet_ping_addr = internet_ping
+        self.pixussi_ping_addr = pixussi_ping
+        self.apn = apn
+        self.vpn_config = vpn_config
 
     def run(self):
         logger.info("PingWorker thread starts")
         while self.wait():
-            self.ping_networks()
+            internet = self.ping_internet()
+
+            topic = "autopial/system/network/ping/internet"
+            value = internet
+            self.publish(topic, value)
+
+            if not internet:
+                self.vpn_disconnect()
+                self.lte_connect()
+                continue
+
+            vpn = self.ping_vpn()
+            topic = "autopial/system/network/ping/pixussi"
+            value = vpn
+            self.publish(topic, value)
+
+            if not vpn:
+                self.vpn_connect()
+
+        self.vpn_disconnect()
+        self.lte_disconnect()
         logger.info("PingWorker thread ends")
 
     def ping(self, hostname):
         giveFeedback = True
-
         if platform.system() == "Windows":
             response = os.system("ping " + hostname + " -n 1")
         else:
-            response = os.system("ping -c 1 " + hostname)
-
+            response = subprocess.call(['/bin/ping', hostname, '-c', '1', '-w', '2'])
         return True if response == 0 else False
 
-    def ping_networks(self):
-        topic = "autopial/system/network/ping/internet"
-        value = self.ping(self.internet_ping)
-        self.publish(topic, value)
+    def ping_internet(self):
+        return self.ping(self.internet_ping_addr)
 
-        topic = "autopial/system/network/ping/pixussi"
-        value = self.ping(self.pixussi_ping)
-        self.publish(topic, value)
-        pass
+    def lte_disconnect(self):
+        if self.lte_process is None:
+            return
 
+        logger.info("Disconnecting from LTE network")
+        self.lte_process.terminate()
+        time.sleep(2)
+        self.lte_process = None
+
+    def lte_connect(self):
+        if self.lte_process is not None and self.lte_process.poll() is not None:
+            self.lte_disconnect()
+            return
+
+        logger.info("Connecting to LTE network")
+        self.lte_process = subprocess.Popen(['/home/pi/files/quectel-CM/quectel-CM', '-s', self.apn])
+        time.sleep(5)
+        return
+
+    def ping_vpn(self):
+        return self.ping(self.pixussi_ping_addr)
+
+    def vpn_disconnect(self):
+        if self.vpn_process is None:
+            return
+
+        logger.info("Disconnecting from VPN network")
+        self.vpn_process.terminate()
+        time.sleep(2)
+        self.vpn_process = None
+
+    def vpn_connect(self):
+        if self.vpn_process is not None and self.vpn_process.poll() is not None:
+            self.lte_disconnect()
+            return
+
+        logger.info("Connecting to VPN network")
+        self.vpn_process = subprocess.Popen(['/usr/sbin/openvpn', self.vpn_config])
+        time.sleep(5)
+        return
 
 
 def get_sysmon():
@@ -186,8 +243,10 @@ if __name__ == '__main__':
         interface_name = cfg.get("workers", "BandwidthWorker", "interface")
 
         ping_publish_every = cfg.get("workers", "PingWorker", "publish_every")
-        internet_ping = cfg.get("workers", "PingWorker", "internet")
-        pixussi_ping = cfg.get("workers", "PingWorker", "pixussi")
+        internet_adress = cfg.get("workers", "PingWorker", "internet_adress")
+        pixussi_adress = cfg.get("workers", "PingWorker", "pixussi_adress")
+        apn = cfg.get("workers", "PingWorker", "apn")
+        vpn_config = cfg.get("workers", "PingWorker", "vpn_config")
     except BaseException as e:
         logger.error("Invalid config file: {}".format(e))
         sys.exit(1)
@@ -203,8 +262,10 @@ if __name__ == '__main__':
 
     worker_ping = PingWorker("PingWorker",
                              time_sleep=ping_publish_every,
-                             internet_ping=internet_ping,
-                             pixussi_ping=pixussi_ping)
+                             internet_ping=internet_adress,
+                             pixussi_ping=pixussi_adress,
+                             apn=apn,
+                             vpn_config=vpn_config)
     worker_ping.start()
 
     try:
